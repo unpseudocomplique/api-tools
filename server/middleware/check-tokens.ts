@@ -3,7 +3,7 @@ import { PrismaClient } from '@prisma/client'
 const prisma = new PrismaClient()
 
 export default defineEventHandler(async (event) => {
-  return
+  return;
     const session = await requireUserSession(event)
   const userId = session.user.id
 

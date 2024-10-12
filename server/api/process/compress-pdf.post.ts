@@ -1,19 +1,17 @@
 import { PDFDocument, PDFImage } from 'pdf-lib'
 import { PrismaClient } from '@prisma/client'
 import sharp from 'sharp'
+import { checkToken } from '~/server/utils/check-token'
+import { Readable, PassThrough } from 'stream'
+import { spawn, exec } from 'child_process';
+import { promises as fs } from 'fs';
+import path from 'path';
+import os from 'os';
 
 const prisma = new PrismaClient()
 
 export default defineEventHandler(async (event) => {
-  const session = await requireUserSession(event)
-  const userId = session.user.id
-
-  if (!userId) {
-    throw createError({
-      statusCode: 401,
-      statusMessage: 'Non autorisé',
-    })
-  }
+  const user = await checkToken(event)
 
 
   const files = await readMultipartFormData(event)
@@ -31,7 +29,6 @@ export default defineEventHandler(async (event) => {
   const fileName = files[0].filename
 
   // Vérifier les tokens de l'utilisateur
-  const user = await prisma.user.findUnique({ where: { id: userId } })
   const requiredTokens = Math.ceil(pdfData.length / (1024 * 1024)) // 1 token par Mo
 
   if (user.tokens < requiredTokens) {
@@ -44,33 +41,46 @@ export default defineEventHandler(async (event) => {
   try {
     // Compression du PDF
     const pdfDoc = await PDFDocument.load(pdfData)
-    const compressedPdfBytes = await compressPdf(pdfDoc)
+    const pdfCompressed = await compressPdf(pdfDoc)
     
 
     // Mise à jour des tokens et enregistrement de la transaction
     await prisma.user.update({
-      where: { id: userId },
+      where: { id: user.id },
       data: { tokens: user.tokens - requiredTokens },
     })
 
+    console.log('tokens', user.tokens)
     await prisma.transaction.create({
       data: {
-        userId,
+        userId: user.id,
         type: 'compress-pdf',
         amount: requiredTokens,
         status: 'success',
       },
     })
 
-    return {
-      compressedPdf: compressedPdfBytes,
-      fileName: `compressed_${fileName}`,
-      tokensUsed: requiredTokens,
-    }
+    console.log('transaction finished')
+
+    // const base64String = Buffer.from(compressedPdfBytes).toString('base64');
+
+    //pdf to readable stream
+    const pdfBytes = await pdfCompressed.save();
+    const smallerPdfBytes = await compressPdfWithGhostscript(pdfBytes);
+    console.log('smallerPdfBytes --------', smallerPdfBytes)
+    const readableStream = new Readable();
+    readableStream.push(Buffer.from(smallerPdfBytes)); // Pousser les données PDF dans le flux
+    readableStream.push(null); // Indiquer la fin du flux
+
+    readableStream;
+
+    return sendStream(event, readableStream);
   } catch (error) {
+
+    console.log('error', error)
     await prisma.transaction.create({
       data: {
-        userId,
+        userId: user.id,
         type: 'compress-pdf',
         amount: requiredTokens,
         status: 'failed',
@@ -86,11 +96,17 @@ export default defineEventHandler(async (event) => {
 
 
 
-async function compressPdf(inputFile: PDFDocument) {
+const compressPdf = async (inputPdfDoc: PDFDocument) => {
 
+  // Remove metadata
+  inputPdfDoc.setTitle('');
+  inputPdfDoc.setAuthor('');
+  inputPdfDoc.setSubject('');
+  inputPdfDoc.setProducer('');
+  inputPdfDoc.setCreator('');
 
-  // Compress the images (if present)
-  const pages = inputFile.getPages();
+  // Compress images on each page
+  const pages = inputPdfDoc.getPages();
   for (const page of pages) {
     const images = page.node.Resources?.XObject;
     if (images) {
@@ -98,13 +114,14 @@ async function compressPdf(inputFile: PDFDocument) {
         if (image instanceof PDFImage) {
           const imageBytes = image.bytes;
 
-          // Compress the image using sharp
+          // Compress the image using sharp with aggressive settings
           const compressedImageBytes = await sharp(imageBytes)
-            .jpeg({ quality: 60 }) // Adjust quality as necessary
+            .resize({ width: Math.floor(image.width / 4), height: Math.floor(image.height / 4) }) // More downsample
+            .jpeg({ quality: 40 }) // Aggressive compression
             .toBuffer();
 
           // Embed the compressed image back into the PDF
-          const compressedImage = await inputFile.embedJpg(compressedImageBytes);
+          const compressedImage = await inputPdfDoc.embedJpg(compressedImageBytes);
           page.drawImage(compressedImage, {
             x: image.x,
             y: image.y,
@@ -112,15 +129,83 @@ async function compressPdf(inputFile: PDFDocument) {
             height: image.height,
           });
 
-          // Optionally, remove the original image
+          // Optionally remove the original image
           delete page.node.Resources.XObject[key];
         }
       }
     }
   }
 
-  // Serialize the PDF document to bytes
-  const pdfBytes = await inputFile.save();
+  // Remove annotations and form fields
+  removeAnnotationsAndFields(inputPdfDoc);
 
-  return pdfBytes;
-}
+  // Create a new optimized PDF document
+  const optimizedPdfDoc = await PDFDocument.create();
+  const copiedPages = await optimizedPdfDoc.copyPages(inputPdfDoc, inputPdfDoc.getPageIndices());
+  copiedPages.forEach(page => optimizedPdfDoc.addPage(page));
+
+  return optimizedPdfDoc;
+};
+
+const removeAnnotationsAndFields = (pdfDoc: PDFDocument) => {
+  const pages = pdfDoc.getPages();
+  for (const page of pages) {
+    // Remove annotations
+    page.node.Annots = undefined;
+
+    // Remove form fields
+    const acroForm = pdfDoc.catalog.get('AcroForm');
+    if (acroForm) {
+      acroForm.set('Fields', []);
+    }
+  }
+};
+
+const compressPdfWithGhostscript = async (pdfBytes) => {
+  const inputPath = path.join(os.tmpdir(), `input-${Date.now()}.pdf`);
+  const outputPath = path.join(os.tmpdir(), `output-${Date.now()}.pdf`);
+
+  try {
+    // Écrire le PDF dans un fichier temporaire
+    await fs.writeFile(inputPath, pdfBytes);
+
+    // Lancer Ghostscript pour compresser le fichier PDF
+    await new Promise((resolve, reject) => {
+      const gs = spawn('gs', [
+        '-sDEVICE=pdfwrite',
+        '-dCompatibilityLevel=1.4',
+        '-dPDFSETTINGS=/ebook', // Essayez avec un autre niveau de compression
+        '-dNOPAUSE',
+        '-dQUIET',
+        '-dBATCH',
+        `-sOutputFile=${outputPath}`,
+        inputPath
+      ]);
+
+      gs.on('close', (code) => {
+        if (code === 0) {
+          resolve();
+        } else {
+          reject(new Error(`Ghostscript exited with code ${code}`));
+        }
+      });
+
+      // Capture des erreurs
+      gs.stderr.on('data', (data) => {
+        console.error(`Ghostscript error: ${data}`);
+      });
+    });
+
+    // Lire le fichier de sortie compressé
+    const compressedPdfBytes = await fs.readFile(outputPath);
+
+    return compressedPdfBytes;
+
+  } finally {
+    // Nettoyer les fichiers temporaires
+    await Promise.all([
+      fs.unlink(inputPath).catch(() => { }), // Ignorer les erreurs de suppression
+      fs.unlink(outputPath).catch(() => { })
+    ]);
+  }
+};

@@ -17,6 +17,7 @@ model User {
   autoRecharge       Boolean      @default(false)
   autoRechargeAmount Int?
   transactions       Transaction[]
+  apiKeys            ApiKey[]
   createdAt          DateTime     @default(now())
   updatedAt          DateTime     @updatedAt
 }
@@ -29,4 +30,14 @@ model Transaction {
   amount    Int
   status    String
   createdAt DateTime @default(now())
+}
+
+model ApiKey {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  key       String   @unique
+  name      String
+  createdAt DateTime @default(now())
+  lastUsed  DateTime?
 }

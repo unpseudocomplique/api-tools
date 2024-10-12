@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev # Dockerfile pour l'environnement de développement
+    volumes:
+      - .:/app  # Monte le code local dans le conteneur
+      - /app/node_modules  # Prévenir l'écrasement des node_modules du conteneur
+    environment:
+      NODE_ENV: development
+      CHOKIDAR_USEPOLLING: 'true'
+    ports:
+      - '3000:3000'  # Expose l'application sur le port 3000
+    stdin_open: true
+    tty: true
