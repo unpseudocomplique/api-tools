@@ -7,7 +7,7 @@
     "dev": "prisma generate && nuxt dev",
     "generate": "nuxt generate",
     "preview": "nuxt preview",
-    "start": "npx prisma migrate deploy && nuxi start",
+    "start": "npx prisma migrate deploy && nuxi build && nuxi start",
     "postinstall": "nuxt prepare"
   },
   "dependencies": {
