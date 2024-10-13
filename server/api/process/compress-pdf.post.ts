@@ -60,19 +60,18 @@ export default defineEventHandler(async (event) => {
       },
     })
 
-    console.log('transaction finished')
 
     // const base64String = Buffer.from(compressedPdfBytes).toString('base64');
 
     //pdf to readable stream
-    const pdfBytes = await pdfCompressed.save();
+    const reducedImages = await compressPdf(pdfCompressed);
+    const pdfBytes = await reducedImages.save();
     const smallerPdfBytes = await compressPdfWithGhostscript(pdfBytes);
-    console.log('smallerPdfBytes --------', smallerPdfBytes)
     const readableStream = new Readable();
     readableStream.push(Buffer.from(smallerPdfBytes)); // Pousser les données PDF dans le flux
     readableStream.push(null); // Indiquer la fin du flux
 
-    readableStream;
+    console.log('transaction finished')
 
     return sendStream(event, readableStream);
   } catch (error) {
@@ -97,14 +96,6 @@ export default defineEventHandler(async (event) => {
 
 
 const compressPdf = async (inputPdfDoc: PDFDocument) => {
-
-  // Remove metadata
-  inputPdfDoc.setTitle('');
-  inputPdfDoc.setAuthor('');
-  inputPdfDoc.setSubject('');
-  inputPdfDoc.setProducer('');
-  inputPdfDoc.setCreator('');
-
   // Compress images on each page
   const pages = inputPdfDoc.getPages();
   for (const page of pages) {
@@ -174,7 +165,7 @@ const compressPdfWithGhostscript = async (pdfBytes) => {
       const gs = spawn('gs', [
         '-sDEVICE=pdfwrite',
         '-dCompatibilityLevel=1.4',
-        '-dPDFSETTINGS=/ebook', // Essayez avec un autre niveau de compression
+        '-dPDFSETTINGS=/screen', // Essayez avec un autre niveau de compression
         '-dNOPAUSE',
         '-dQUIET',
         '-dBATCH',
@@ -192,7 +183,7 @@ const compressPdfWithGhostscript = async (pdfBytes) => {
 
       // Capture des erreurs
       gs.stderr.on('data', (data) => {
-        console.error(`Ghostscript error: ${data}`);
+        // console.error(`Ghostscript error: ${data}`);
       });
     });
 
